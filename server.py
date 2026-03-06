@@ -17,9 +17,9 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ.get('DB_NAME', 'fastmecanic')]
 
 # JWT Settings
 JWT_SECRET = os.environ.get('JWT_SECRET', 'fastmechanic-secret-key-2024')
@@ -51,9 +51,10 @@ class AppointmentCreate(BaseModel):
     oil_type: str
     appointment_date: str
     appointment_time: str
-    payment_method: str  # cash, zelle, cashapp
+    payment_method: str
     mechanic_buys_oil: bool = False
     notes: Optional[str] = None
+    selected_services: Optional[List[str]] = None
 
 class Appointment(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -73,7 +74,8 @@ class Appointment(BaseModel):
     mechanic_buys_oil: bool = False
     deposit_paid: bool = False
     notes: Optional[str] = None
-    status: str = "pending"  # pending, confirmed, completed, cancelled
+    selected_services: Optional[List[str]] = None
+    status: str = "pending"
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class AppointmentUpdate(BaseModel):
@@ -99,6 +101,49 @@ class Admin(BaseModel):
     name: str
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+# Settings Models
+class BusinessProfile(BaseModel):
+    name: str = "Jose Montufar"
+    phone: str = "(562) 298-9551"
+    email: str = "fastmecanic01@gmail.com"
+    bio: str = "Mecánico profesional con servicio a domicilio"
+
+class WorkSchedule(BaseModel):
+    day: str
+    enabled: bool = True
+    start_time: str = "08:00"
+    end_time: str = "17:00"
+
+class Service(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    name_en: str
+    price: float
+    duration: int = 60  # minutes
+    enabled: bool = True
+
+class PaymentMethod(BaseModel):
+    id: str
+    name: str
+    enabled: bool = True
+    details: str = ""
+
+class ServiceZone(BaseModel):
+    city: str
+    state: str
+    enabled: bool = True
+
+class BusinessSettings(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    
+    id: str = "main_settings"
+    profile: BusinessProfile = BusinessProfile()
+    schedule: List[WorkSchedule] = []
+    services: List[Service] = []
+    payment_methods: List[PaymentMethod] = []
+    service_zones: List[ServiceZone] = []
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
 # ============ AUTH HELPERS ============
 
 def hash_password(password: str) -> str:
@@ -111,7 +156,7 @@ def create_token(admin_id: str, username: str) -> str:
     payload = {
         "sub": admin_id,
         "username": username,
-        "exp": datetime.now(timezone.utc).timestamp() + 86400  # 24 hours
+        "exp": datetime.now(timezone.utc).timestamp() + 86400
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -127,6 +172,46 @@ async def get_current_admin(credentials: HTTPAuthorizationCredentials = Depends(
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+# ============ INIT DEFAULT SETTINGS ============
+
+async def init_default_settings():
+    existing = await db.settings.find_one({"id": "main_settings"})
+    if not existing:
+        default_settings = BusinessSettings(
+            profile=BusinessProfile(),
+            schedule=[
+                WorkSchedule(day="monday", enabled=True, start_time="08:00", end_time="17:00"),
+                WorkSchedule(day="tuesday", enabled=True, start_time="08:00", end_time="17:00"),
+                WorkSchedule(day="wednesday", enabled=True, start_time="08:00", end_time="17:00"),
+                WorkSchedule(day="thursday", enabled=True, start_time="08:00", end_time="17:00"),
+                WorkSchedule(day="friday", enabled=True, start_time="08:00", end_time="17:00"),
+                WorkSchedule(day="saturday", enabled=True, start_time="09:00", end_time="14:00"),
+                WorkSchedule(day="sunday", enabled=False, start_time="09:00", end_time="14:00"),
+            ],
+            services=[
+                Service(id="oil-conventional", name="Cambio de Aceite Convencional", name_en="Conventional Oil Change", price=45.00, duration=45),
+                Service(id="oil-synthetic", name="Cambio de Aceite Sintético", name_en="Synthetic Oil Change", price=75.00, duration=45),
+                Service(id="oil-semi", name="Cambio de Aceite Semi-Sintético", name_en="Semi-Synthetic Oil Change", price=60.00, duration=45),
+                Service(id="oil-high-mileage", name="Aceite Alto Kilometraje", name_en="High Mileage Oil", price=70.00, duration=45),
+                Service(id="brake-inspection", name="Inspección de Frenos", name_en="Brake Inspection", price=25.00, duration=30),
+                Service(id="fluid-check", name="Revisión de Líquidos", name_en="Fluid Check", price=15.00, duration=20),
+                Service(id="filter-air", name="Cambio Filtro de Aire", name_en="Air Filter Change", price=35.00, duration=15),
+                Service(id="filter-cabin", name="Cambio Filtro de Cabina", name_en="Cabin Filter Change", price=40.00, duration=20),
+            ],
+            payment_methods=[
+                PaymentMethod(id="cash", name="Cash", enabled=True, details="Efectivo al momento del servicio"),
+                PaymentMethod(id="zelle", name="Zelle", enabled=True, details=""),
+                PaymentMethod(id="cashapp", name="Cash App", enabled=True, details=""),
+            ],
+            service_zones=[
+                ServiceZone(city="Long Beach", state="CA", enabled=True),
+                ServiceZone(city="Los Angeles", state="CA", enabled=True),
+                ServiceZone(city="Compton", state="CA", enabled=True),
+                ServiceZone(city="Carson", state="CA", enabled=True),
+            ]
+        )
+        await db.settings.insert_one(default_settings.model_dump())
+
 # ============ PUBLIC ROUTES ============
 
 @api_router.get("/")
@@ -136,6 +221,27 @@ async def root():
 @api_router.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+# Get public settings (for customers)
+@api_router.get("/settings/public")
+async def get_public_settings():
+    await init_default_settings()
+    settings = await db.settings.find_one({"id": "main_settings"}, {"_id": 0})
+    if not settings:
+        return {}
+    # Return only public info
+    return {
+        "profile": {
+            "name": settings.get("profile", {}).get("name"),
+            "phone": settings.get("profile", {}).get("phone"),
+            "email": settings.get("profile", {}).get("email"),
+            "bio": settings.get("profile", {}).get("bio"),
+        },
+        "schedule": [s for s in settings.get("schedule", []) if s.get("enabled")],
+        "services": [s for s in settings.get("services", []) if s.get("enabled")],
+        "payment_methods": [p for p in settings.get("payment_methods", []) if p.get("enabled")],
+        "service_zones": [z for z in settings.get("service_zones", []) if z.get("enabled")],
+    }
 
 # Create appointment (public)
 @api_router.post("/appointments", response_model=Appointment)
@@ -153,7 +259,8 @@ async def create_appointment(data: AppointmentCreate):
         appointment_time=data.appointment_time,
         payment_method=data.payment_method,
         mechanic_buys_oil=data.mechanic_buys_oil,
-        notes=data.notes
+        notes=data.notes,
+        selected_services=data.selected_services
     )
     
     doc = appointment.model_dump()
@@ -162,7 +269,7 @@ async def create_appointment(data: AppointmentCreate):
     
     return appointment
 
-# Get appointment by ID (public - for customer confirmation)
+# Get appointment by ID (public)
 @api_router.get("/appointments/{appointment_id}", response_model=Appointment)
 async def get_appointment(appointment_id: str):
     doc = await db.appointments.find_one({"id": appointment_id}, {"_id": 0})
@@ -193,7 +300,6 @@ async def admin_login(data: AdminLogin):
 
 @api_router.post("/admin/setup")
 async def setup_admin(data: AdminCreate):
-    # Check if any admin exists
     existing = await db.admins.find_one({})
     if existing:
         raise HTTPException(status_code=400, detail="Admin already exists")
@@ -206,6 +312,9 @@ async def setup_admin(data: AdminCreate):
     
     doc = admin.model_dump()
     await db.admins.insert_one(doc)
+    
+    # Initialize default settings
+    await init_default_settings()
     
     return {"message": "Admin created successfully", "username": data.username}
 
@@ -259,7 +368,6 @@ async def get_dashboard_stats(admin = Depends(get_current_admin)):
     completed = await db.appointments.count_documents({"status": "completed"})
     cancelled = await db.appointments.count_documents({"status": "cancelled"})
     
-    # Get today's appointments
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     today_count = await db.appointments.count_documents({"appointment_date": today})
     
@@ -279,13 +387,85 @@ async def get_current_admin_info(admin = Depends(get_current_admin)):
         raise HTTPException(status_code=404, detail="Admin not found")
     return admin_doc
 
+# ============ SETTINGS ROUTES ============
+
+@api_router.get("/admin/settings")
+async def get_settings(admin = Depends(get_current_admin)):
+    await init_default_settings()
+    settings = await db.settings.find_one({"id": "main_settings"}, {"_id": 0})
+    return settings
+
+@api_router.put("/admin/settings/profile")
+async def update_profile(profile: BusinessProfile, admin = Depends(get_current_admin)):
+    await db.settings.update_one(
+        {"id": "main_settings"},
+        {"$set": {"profile": profile.model_dump(), "updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Profile updated"}
+
+@api_router.put("/admin/settings/schedule")
+async def update_schedule(schedule: List[WorkSchedule], admin = Depends(get_current_admin)):
+    await db.settings.update_one(
+        {"id": "main_settings"},
+        {"$set": {"schedule": [s.model_dump() for s in schedule], "updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Schedule updated"}
+
+@api_router.put("/admin/settings/services")
+async def update_services(services: List[Service], admin = Depends(get_current_admin)):
+    await db.settings.update_one(
+        {"id": "main_settings"},
+        {"$set": {"services": [s.model_dump() for s in services], "updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Services updated"}
+
+@api_router.post("/admin/settings/services")
+async def add_service(service: Service, admin = Depends(get_current_admin)):
+    await db.settings.update_one(
+        {"id": "main_settings"},
+        {"$push": {"services": service.model_dump()}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Service added", "service": service}
+
+@api_router.delete("/admin/settings/services/{service_id}")
+async def delete_service(service_id: str, admin = Depends(get_current_admin)):
+    await db.settings.update_one(
+        {"id": "main_settings"},
+        {"$pull": {"services": {"id": service_id}}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Service deleted"}
+
+@api_router.put("/admin/settings/payment-methods")
+async def update_payment_methods(payment_methods: List[PaymentMethod], admin = Depends(get_current_admin)):
+    await db.settings.update_one(
+        {"id": "main_settings"},
+        {"$set": {"payment_methods": [p.model_dump() for p in payment_methods], "updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Payment methods updated"}
+
+@api_router.put("/admin/settings/service-zones")
+async def update_service_zones(service_zones: List[ServiceZone], admin = Depends(get_current_admin)):
+    await db.settings.update_one(
+        {"id": "main_settings"},
+        {"$set": {"service_zones": [z.model_dump() for z in service_zones], "updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Service zones updated"}
+
+@api_router.post("/admin/settings/service-zones")
+async def add_service_zone(zone: ServiceZone, admin = Depends(get_current_admin)):
+    await db.settings.update_one(
+        {"id": "main_settings"},
+        {"$push": {"service_zones": zone.model_dump()}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return {"message": "Service zone added"}
+
 # Include the router in the main app
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
