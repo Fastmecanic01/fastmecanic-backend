@@ -17,9 +17,18 @@ import bcrypt
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+# Sanitize environment variables to remove invisible control characters
+def sanitize_env(value):
+    """Remove control characters including backspace (\010) that may be inserted by mobile UIs"""
+    if not value:
+        return value
+    # Remove all ASCII control characters (0-31) including backspace (8)
+    import re
+    return re.sub(r'[\x00-\x1F\x7F]', '', value)
+
 # MongoDB connection
-mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
-db_name = os.environ.get('DB_NAME', 'fastmecanic')
+mongo_url = sanitize_env(os.environ.get('MONGO_URL', 'mongodb://localhost:27017'))
+db_name = sanitize_env(os.environ.get('DB_NAME', 'fastmecanic'))
 
 client = AsyncIOMotorClient(mongo_url)
 db = client[db_name]
